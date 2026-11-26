@@ -1,0 +1,115 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "P4-CAN: Build (postv3)",
+      "detail": "编译 ESP32-P4 芯片 v3.00+ 固件",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/build.sh",
+      "args": ["postv3"],
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": {
+        "base": "$gcc",
+        "fileLocation": ["autoDetect", "${workspaceFolder}/firmware/P4-CAN-Universal-v3.35.3"]
+      },
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "P4-CAN: Build (prev3)",
+      "detail": "编译 ESP32-P4 芯片 v3.00 之前版本固件",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/build.sh",
+      "args": ["prev3"],
+      "group": "build",
+      "problemMatcher": {
+        "base": "$gcc",
+        "fileLocation": ["autoDetect", "${workspaceFolder}/firmware/P4-CAN-Universal-v3.35.3"]
+      },
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "P4-CAN: Build all variants",
+      "detail": "同时编译 postv3 与 prev3",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/build.sh",
+      "args": ["all"],
+      "problemMatcher": {
+        "base": "$gcc",
+        "fileLocation": ["autoDetect", "${workspaceFolder}/firmware/P4-CAN-Universal-v3.35.3"]
+      },
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "P4-CAN: Clean rebuild (postv3)",
+      "detail": "删除构建缓存后完整重编",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/build.sh",
+      "args": ["postv3", "--clean"],
+      "problemMatcher": {
+        "base": "$gcc",
+        "fileLocation": ["autoDetect", "${workspaceFolder}/firmware/P4-CAN-Universal-v3.35.3"]
+      },
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "P4-CAN: Generate IntelliSense database",
+      "detail": "生成 build/compile_commands.json",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/build.sh",
+      "args": ["postv3", "--ide-db"],
+      "problemMatcher": []
+    },
+    {
+      "label": "P4-CAN: List serial ports",
+      "detail": "列出 /dev/cu.* 串口",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/flash.sh",
+      "args": ["--list"],
+      "problemMatcher": []
+    },
+    {
+      "label": "P4-CAN: Flash (postv3)",
+      "detail": "分段烧录到 ESP32-P4 原生 USB Serial/JTAG；执行前会二次确认",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/flash.sh",
+      "args": ["postv3"],
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "P4-CAN: Flash (prev3)",
+      "detail": "prev3 变体分段烧录",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/flash.sh",
+      "args": ["prev3"],
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "P4-CAN: Flash merged 32MB image",
+      "detail": "烧写整片镜像到 0x0 (耗时数分钟，适合新板首次上电)",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/flash.sh",
+      "args": ["--merged"],
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "P4-CAN: Flash without confirmation",
+      "detail": "跳过二次确认直接分段烧录 (确认已在下载模式时用)",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/flash.sh",
+      "args": ["--yes"],
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "P4-CAN: Monitor serial",
+      "detail": "115200 打开串口监视 (Ctrl+] 退出)",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/monitor.sh",
+      "problemMatcher": [],
+      "isBackground": false
+    }
+  ]
+}

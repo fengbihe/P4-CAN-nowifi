@@ -1,0 +1,30 @@
+{
+  "// 说明": "打开 P4-CAN/ 目录时自动生效",
+  "files.exclude": {
+    "**/.DS_Store": true,
+    "build/build-postv3": true,
+    "build/build-prev3": true,
+    "build/ide-db-postv3": true,
+    "build/ide-db-prev3": true,
+    "original_backup/**/.git": true
+  },
+  "search.exclude": {
+    "build/**": true,
+    "original_backup/**": true,
+    "firmware/P4-CAN-Universal-v3.35.3/index_html.h": true,
+    "firmware/P4-CAN-Universal-v3.35.3/lab_fonts.h": true,
+    "firmware/P4-CAN-Universal-v3.35.3/dashboard_icon.h": true,
+    "firmware/P4-CAN-Universal-v3.35.3/web_api.h": true
+  },
+  "files.associations": {
+    "*.ino": "cpp",
+    "*.tel": "plaintext"
+  },
+  "C_Cpp.default.configurationProvider": "ms-vscode.cpptools",
+  "C_Cpp.intelliSenseEngineFallback": "enabled",
+  "C_Cpp.errorSquiggles": "enabled",
+  "terminal.integrated.scrollback": 20000,
+  "editor.rulers": [100],
+  "files.trimTrailingWhitespace": false,
+  "files.insertFinalNewline": false
+}

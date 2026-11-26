@@ -1,0 +1,429 @@
+// P4-CAN Universal v3.35.0 - Model 3/Y / Model YL firmware
+
+// ============================================================================
+//  用户配置区
+//  ---------------------------------------------------------------------------
+//  所有编译期功能开关都在 user_config.h 里：车型、三路 CAN 引脚、监听/正常模式、
+//  Wi-Fi/BLE/USB 任务开关、以及各驾驶功能（NAG / TLSSC / ISA / R79 / 连续AP /
+//  FSD 可视化 / SmartShift / 预热 / LAB）的启用与关闭。
+//
+//  改 user_config.h → 重新编译 → 烧录，即可脱离手机 App / 网页面板独立运行。
+//  取值约定：-1 = 不干预（用 Flash 里的值）、0 = 强制关、1 = 强制开。
+// ============================================================================
+#include "user_config.h"
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Preferences.h>
+#include <nvs_flash.h>
+#include <esp_system.h>
+#include <esp_heap_caps.h>
+#include <freertos/semphr.h>
+#include <Update.h>
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
+#include <BLEClient.h>
+#include <BLESecurity.h>
+#if defined(CONFIG_BLUEDROID_ENABLED)
+#include <esp_gap_ble_api.h>
+#elif defined(CONFIG_NIMBLE_ENABLED)
+#include <host/ble_gap.h>
+#include <host/ble_store.h>
+#include <nimble/nimble_port.h>
+#endif
+#include "driver/twai.h"
+#include "pin_config.h"
+
+#ifndef P4CAN_SERIAL_DIAGNOSTICS
+#define P4CAN_SERIAL_DIAGNOSTICS 0
+#endif
+#include "serial_diag.h"
+#if P4CAN_SERIAL_DIAGNOSTICS
+#error "USB CAN logger requires diagnostics disabled to preserve protocol framing"
+#endif
+#if !ARDUINO_USB_MODE || !ARDUINO_USB_CDC_ON_BOOT
+#error "USB CAN logger requires Hardware CDC and JTAG with CDC on boot"
+#endif
+#include "index_html.h"
+#include "lab_fonts.h"
+#include "dashboard_icon.h"
+#include "p4_twai_diag.h"
+#include "p4_twai_error_decode_pure.h"
+#include "can_error_hooks.h"
+#include "vehicle_profile.h"
+#include "r79_timing_capture.h"
+#define P4_R79_TIMING_GATE_REJECTED(bus, frame, wait, result) p4R79TimingGateRejected(bus, frame, wait, result)
+#define P4_R79_TIMING_GATE_REASON(bus, frame, wait, result, reason) p4R79TimingGateRejected(bus, frame, wait, result, reason, p4CanReadinessMask())
+#define P4_R79_TIMING_RX(bus, frame) p4R79TimingRx(bus, frame)
+#define P4_R79_TIMING_TX_BEGIN(bus, frame, wait) p4R79TimingTxBegin(bus, frame, wait, p4CanReadinessMask())
+#define P4_R79_TIMING_TX_END(token, frame, result, called) p4R79TimingTxEnd(token, frame, result, called)
+#include "p4_can.h"
+#include "can_gpio_runtime.h"
+#include "r79_timing_driver.h"
+#include "esp32-hal-hosted.h"
+#include "p4_network.h"
+#include "summon_state_pure.h"
+#include "auto_blinker_pure.h"
+#include "runtime_gate_pure.h"
+#include "can_task_diagnostics_pure.h"
+#include "can_research_capture_pure.h"
+#include "das_status_pure.h"
+#include "ap_display_hold_pure.h"
+#include "mode_h_pure.h"
+#include "pedal_map_session_pure.h"
+#include "ulc_compositor_pure.h"
+#include "feature_config_migration_pure.h"
+#include "can_busoff_persistence_pure.h"
+#include "auto_lane_change_enable_pure.h"
+#include "country_override_pure.h"
+#include "nvs_keep_ble_reset_pure.h"
+#include "tsl9_input_scheduler_pure.h"
+#include "driver_window_lab_pure.h"
+#include "preheat_pure.h"
+#include "driver_monitor_capture_pure.h"
+#include "r79_fixed_policy_pure.h"
+#include "r79_dms_composition_pure.h"
+#include "tsl9_hands_on_0x399_pure.h"
+#include "fixed_point_pure.h"
+#include "text_format_arduino.h"
+#include "json_writer_arduino.h"
+
+#define FW_VERSION "v3.35.3"
+
+#include "continuous_ap_fsm_pure.h"
+#include "p4can_core_state.h"
+#include "p4can_forward.h"
+#include "can_usb_logger.h"
+#include "can_research_capture.h"
+#include "driver_monitor_capture.h"
+#include "s3xy_ble.h"
+#include "can_core.h"
+#include "can_busoff_persistence.h"
+#include "vehicle_logic.h"
+#include "automatic_shift/gear_shift_runtime.h"
+#include "continuous_ap_runtime.h"
+#include "preheat_runtime.h"
+#include "lighting/lighting_runtime.h"
+#include "web_api.h"
+#include "can_runtime.h"
+#include "can_usb_logger_task.h"
+// 必须放在最后：它要用到上面所有头文件里的全局量（p4CanTxPins / nagCfg 等）
+#include "user_config_apply.h"
+
+void setup() {
+  const uint32_t diagnosticBootId = esp_random();
+  p4TwaiDiagInit(diagnosticBootId);
+  canDiagInit(diagnosticBootId);
+  bootTime = millis();
+  Serial.begin(115200);
+  delay(300);
+#if P4UCFG_WEB_ENABLED
+  if (!p4NetworkPrepare())
+    Serial.println("[P4-CAN WiFi] HOSTED_PINS_FAILED: WiFi/BLE initialization blocked");
+#else
+  Serial.println("[P4-CAN] USER_CONFIG: Wi-Fi/Web disabled, esp-hosted not initialized");
+#endif
+  canUsbLoadMode();
+  setCanTxAdministrativeHold(false);
+  delay(100); // Boot settle retained for behavior compatibility; CAN startup is not held here
+
+  rtcBootCount++;
+#if P4CAN_SERIAL_DIAGNOSTICS
+  esp_reset_reason_t reset_reason = esp_reset_reason();
+  Serial.printf("\n=== P4-CAN Unified BOOT ===\n");
+  Serial.printf("Reset reason: %d (%s)\n", reset_reason, resetReasonName(reset_reason));
+  Serial.printf("RTC boot count: %lu\n", (unsigned long)rtcBootCount);
+  if (reset_reason == ESP_RST_BROWNOUT) {
+    Serial.println("WARNING: Brownout detected!");
+  }
+  Serial.printf("IDF version: %s\n", esp_get_idf_version());
+#endif
+
+  // NVS init. Universal v3.x never auto-erases a configured profile because of an
+  // initialization error. An explicit first-Universal migration or Factory
+  // Reset is the only path that erases the full NVS partition.
+  esp_err_t err = nvs_flash_init();
+  if (err != ESP_OK) {
+    vehicleProfileNvsError = true;
+    vehicleProfileSetupMode = true;
+    P4CAN_SERIAL_PRINTF("NVS: Init failed %d (%s) -> SAFE SETUP MODE, no CAN/BLE\n",
+                  (int)err, esp_err_to_name(err));
+  } else {
+    bool keepBleResetGuardActive = false;
+    const bool keepBleResetGuardReadOk =
+        resetNvsKeepBleGuardRead(keepBleResetGuardActive);
+    const NvsKeepBleGuardBootActionPure keepBleBootAction =
+        nvsKeepBleGuardBootActionPure(
+            keepBleResetGuardReadOk, keepBleResetGuardActive);
+    if (keepBleBootAction == NVS_KEEP_BLE_GUARD_SAFE_ERROR_PURE) {
+      vehicleProfileNvsError = true;
+      vehicleProfileSetupMode = true;
+      P4CAN_SERIAL_PRINTLN("BLE-preserving reset guard unreadable -> SAFE SETUP MODE");
+    } else if (keepBleBootAction == NVS_KEEP_BLE_GUARD_RECOVER_PURE) {
+      if (!resetNvsKeepBleRecoverIfNeeded()) {
+        vehicleProfileNvsError = true;
+        P4CAN_SERIAL_PRINTLN("BLE-preserving reset recovery failed -> SAFE SETUP MODE");
+      } else {
+        P4CAN_SERIAL_PRINTLN("BLE-preserving reset recovered after interrupted reset");
+      }
+      vehicleProfileSetupMode = true;
+    } else {
+#if P4CAN_USER_CONFIG && (CFG_BOOT_PROFILE >= 1) && (CFG_BOOT_PROFILE <= 5)
+      // 用户配置区：把车型写死，脱离网页也能进入 CAN 工作状态
+      if (p4UserCfgApplyProfile()) {
+        Serial.printf("[P4-CAN] USER_CONFIG: boot profile forced to %u\n",
+                      (unsigned)CFG_BOOT_PROFILE);
+      } else {
+        Serial.println("[P4-CAN] USER_CONFIG: boot profile write failed, using NVS");
+      }
+#endif
+      CheckedPreferences profileProbe;
+      bool universalInitialized = false;
+      uint8_t storedProfile = VEHICLE_PROFILE_NONE;
+      const bool profileProbeOpened =
+          profileProbe.begin(VEHICLE_PROFILE_NAMESPACE, true);
+      if (profileProbeOpened) {
+        universalInitialized = profileProbe.getBool(VEHICLE_UNIVERSAL_INIT_KEY, false);
+        storedProfile = profileProbe.getUChar(VEHICLE_PROFILE_KEY, VEHICLE_PROFILE_NONE);
+        vehicleProfileMigrationNotice = profileProbe.getBool(VEHICLE_MIGRATION_NOTICE_KEY, false);
+      }
+      const bool profileProbeReadOk = profileProbeOpened && profileProbe.ok();
+      profileProbe.end();
+
+      if (!profileProbeReadOk) {
+        vehicleProfileNvsError = true;
+        vehicleProfileSetupMode = true;
+        P4CAN_SERIAL_PRINTLN("Vehicle profile read failed -> SAFE SETUP MODE, preserving NVS");
+      } else if (!vehicleProfileValid(storedProfile)) {
+        if (!universalInitialized) {
+          P4CAN_SERIAL_PRINTLN("Universal first boot: erasing previous NVS configuration...");
+          if (P4_CAN_DIAG_NVS_WRITE(5, nvs_flash_erase()) == ESP_OK && nvs_flash_init() == ESP_OK &&
+              vehicleProfileWriteBootstrapMarker(true)) {
+            vehicleProfileMigrationNotice = true;
+          } else {
+            vehicleProfileNvsError = true;
+            P4CAN_SERIAL_PRINTLN("Universal migration erase/re-init failed -> SAFE SETUP MODE");
+          }
+        }
+        vehicleProfileSetupMode = true;
+      } else if (!vehicleProfileLoadFromNvs()) {
+        vehicleProfileSetupMode = true;
+        P4CAN_SERIAL_PRINTLN("Vehicle profile invalid/incomplete -> SAFE SETUP MODE");
+      }
+    }
+  }
+
+  (void)p4CanGpioLoadAtBoot();
+#if P4CAN_USER_CONFIG
+  // 用户配置区：p4CanGpioLoadAtBoot() 之后覆盖引脚/监听模式
+  p4UserCfgApplyCan();
+#endif
+
+  canTxBarrierMutex = xSemaphoreCreateMutex();
+  if (!canTxBarrierMutex) {
+    P4CAN_SERIAL_PRINTLN("CAN TX recovery barrier allocation failed! Rebooting...");
+    restartP4CanSafely();
+  }
+
+  // No valid profile means fail-closed setup mode: Wi-Fi/Web/OTA/profile
+  // selection only. CAN controllers, CAN tasks, recovery supervisor and BLE
+  // are not initialized.
+  if (vehicleProfileSetupMode || vehicleProfileNvsError) {
+    P4CAN_SERIAL_PRINTF("PROFILE SETUP MODE profile=%u nvsError=%s migrationNotice=%s\n",
+                  (unsigned)activeVehicleProfile, vehicleProfileNvsError ? "YES" : "NO",
+                  vehicleProfileMigrationNotice ? "YES" : "NO");
+#if P4UCFG_WEB_ENABLED
+    wifiApBootStart();
+    BaseType_t retWeb = xTaskCreatePinnedToCore(webTask, "web", 8192, nullptr, 1, &webTaskHandle, 0);
+    if (retWeb != pdPASS) {
+      P4CAN_SERIAL_PRINTF("Web task creation failed in setup mode: %d\n", retWeb);
+      restartP4CanSafely();
+    }
+#else
+    P4CAN_SERIAL_PRINTLN("USER_CONFIG: web disabled - setup mode has no UI, check NVS/profile");
+#endif
+    P4CAN_SERIAL_PRINTLN("BOOT SAFE SETUP MODE");
+    return;
+  }
+
+  P4CAN_SERIAL_PRINTF("Vehicle Profile=%s CAN A=%s CAN B=%s Turn=%s\n",
+                vehicleProfileName(activeVehicleProfile),
+                activeProfileCanAName(),
+                activeProfileCanBName(),
+                turnSignalVariantName(activeTurnSignalVariant));
+
+  // Load configs. Universal v3.x starts from a full fresh NVS on first Universal boot,
+  // so only the Universal schema/default interpretation is required here.
+  nvsSchemaRead();
+  (void)(featureConfigMigrateToSchema2() && featureConfigMigrateToSchema3());
+  featureCfgLoad();
+  fsdSettingsLoad();
+  gearShiftConfigLoad();
+  serviceSettingsLoad();
+  eapNrLoad();  // EAP anti-restart: restore cached patched 0x331 before CAN starts
+  lightingSettingsLoad();
+  continuousApControlLoad();
+  nagCfgLoad();
+  summonCfgLoad();
+  ulcCfgLoadAndMigrate();
+  retiredLabSpeedSettingsCleanup();
+  visionControlCfgLoad();
+  autoLaneChangeLabCfgLoadAndMigrate();
+  countryOverrideCfgLoad();
+  r79CfgLoad();
+  s3xyAutoLoadConfig();
+  nvsSchemaFinalize();
+  canBusOffPersistenceLoad();
+  preheatMenuLoad();
+#if P4CAN_USER_CONFIG
+  // 用户配置区：所有 xxxLoad() 已完成，这里用编译期开关覆盖（编译期优先于 Flash 值）
+  p4UserCfgApplyFeatures();
+  p4UserCfgApplyTaskGates();
+#endif
+  if (labMenuEnabled) {
+    researchCaptureInit();
+    driverMonitorCaptureInit();
+  } else {
+    P4CAN_SERIAL_PRINTLN("CAN Research Capture: LAB OFF · resources not allocated");
+    P4CAN_SERIAL_PRINTLN("Driver Monitoring Capture: LAB OFF · resources not allocated");
+  }
+
+  P4CAN_SERIAL_PRINTF("Nag mode=%u id=0x%03X torqueCount=%u enabled=%u\n",
+    nagCfg.mode, nagCfg.targetId, nagCfg.torqueCount, nagCfg.enabled);
+  P4CAN_SERIAL_PRINTLN("Summon Monitor=ALWAYS_ON (state/capture/priority only)");
+  P4CAN_SERIAL_PRINTF("TLSSC enabled=%s highwayGate=%s (0x3FD mux0 bit38/39)\n",
+                tlsscEnabled ? "true" : "false",
+                tlsscHighwayGateEnabled ? "true" : "false");
+  P4CAN_SERIAL_PRINTF("LAB enabled=%s ULC alcOff=%u blind=%u ulcOff=%u confirmTiming=%u legacyGate=AUTOSTEER policyGate=AP_ACTIVE\n",
+                labMenuEnabled ? "ON" : "OFF",
+                (unsigned)lab3f8AlcMode, (unsigned)lab3f8UlcBlindMode,
+                (unsigned)lab3f8UlcOffHighwayMode, (unsigned)ulcNoConfirmTimingMode);
+  P4CAN_SERIAL_PRINTF("R79 mode=1 bit19=0 bit47=%s bit18Mode=%u mode1WaitMode=%u mode1DelayMs=%u policy=DEFAULT_ON_MANUAL_DR_SUSPEND\n",
+                r79Hw3Active() ? "STOCK" : "1", (unsigned)r79Bit18Policy,
+                (unsigned)r79Mode1TxWaitMode, (unsigned)r79Mode1DelayMs);
+  P4CAN_SERIAL_PRINTF("S3XY bluetooth=%s auto-connect=%s registry=%u/%u\n",
+                s3xyBluetoothEnabled ? "ON" : "OFF",
+                s3xyAutoEnabled ? "true" : "false",
+                (unsigned)s3xyRegisteredCount(), (unsigned)S3XY_MAX_DEVICES);
+
+  // Board power-on is treated as the wake signal for RX.
+  // Existing per-feature validity gates still control every injection/TX path.
+  // GPIO faults are separate from profile setup so the ordinary Settings page
+  // remains available to repair wiring; never install CAN/start its tasks or BLE.
+  if (!p4CanGpioValid) {
+    Serial.printf("[P4-CAN] %s; WiFi/dashboard recovery only\n", p4CanGpioLastError);
+#if P4UCFG_WEB_ENABLED
+    wifiApBootStart();
+    const BaseType_t retWeb = xTaskCreatePinnedToCore(webTask, "web", 8192, nullptr, 1, &webTaskHandle, 0);
+    if (retWeb != pdPASS) restartP4CanSafely();
+#else
+    P4CAN_SERIAL_PRINTLN("USER_CONFIG: web disabled - cannot recover CAN GPIO from UI");
+#endif
+    return;
+  }
+  P4CAN_SERIAL_PRINTLN("Driver-wake power detected. Starting CAN init immediately...");
+
+  // Match the reference's physical controller order, regardless of profile.
+  bool allCanReady = true;
+  for (uint8_t bus = 0; bus < P4_CAN_COUNT; ++bus) {
+    const bool ready = p4CanInstall(bus, canUsbPassive(),
+        bus == p4CanBusB() ? TWAI_TX_QUEUE_LEN : 32);
+    allCanReady = ready && allCanReady;
+    Serial.printf("[P4-CAN] CAN%u %s TWAI%u TX%d RX%d %s: %s\n", bus + 1,
+        p4CanRoleName(bus), bus, p4CanTxPins[bus], p4CanRxPins[bus],
+        p4CanPassive[bus] ? "LISTEN_ONLY" : "NORMAL", esp_err_to_name(p4CanInitError[bus]));
+  }
+  nativeAReady = p4CanOnline[p4CanBusA()];
+  twaiReady = p4CanOnline[p4CanBusB()];
+  // YL additional BODY is optional for VEHICLE R79; keep its failure visible
+  // while allowing the required VEHICLE/PARTY pair to start normally.
+  if (!allCanReady && !(activeProfileIsYl() && nativeAReady && twaiReady))
+    restartP4CanSafely();
+  canTwaiResetErrorAlertWindow();
+  canInitTime = millis();
+  bootCaptureMarkOnce(&bootCapCanInitDoneMs);
+  if (!recoveryStartCanTasks()) restartP4CanSafely();
+  if(xTaskCreatePinnedToCore(gearShiftTask,"autoShift",12288,nullptr,2,nullptr,0)!=pdPASS)restartP4CanSafely();
+  if(xTaskCreatePinnedToCore(lightingTask,"lighting",4096,nullptr,1,nullptr,0)!=pdPASS)restartP4CanSafely();
+  bootCaptureMarkOnce(&bootCapCanTasksStartedMs);
+
+  BaseType_t retSup = xTaskCreatePinnedToCore(canSupervisorTask, "canSup", 6144, nullptr, 3, &canSupervisorHandle, 0);
+  if (retSup != pdPASS) {
+    P4CAN_SERIAL_PRINTF("CAN supervisor task creation failed: %d\n", retSup);
+    restartP4CanSafely();
+  }
+
+  P4CAN_SERIAL_PRINTF("[BOOT] CAN RX tasks started at %lu ms\n", (unsigned long)(millis() - bootTime));
+
+  // Start Wi-Fi/web after the CAN receive path is live.
+#if P4UCFG_WEB_ENABLED
+  wifiApBootStart();
+  BaseType_t retWeb = xTaskCreatePinnedToCore(webTask, "web", 8192, nullptr, 1, &webTaskHandle, 0);
+  if (retWeb != pdPASS) {
+    P4CAN_SERIAL_PRINTF("Web task creation failed: %d\n", retWeb);
+    restartP4CanSafely();
+  }
+#else
+  webTaskHandle = nullptr;
+  P4CAN_SERIAL_PRINTLN("USER_CONFIG: web task disabled");
+#endif
+
+  // S3XY BLE task runs independently on core 0. If Bluetooth Master is OFF it
+  // never initializes BLEDevice at all. If ON, the mapper remains lazy with no
+  // saved target and auto-initializes for saved targets or explicit commands.
+  if (s3xyBluetoothEnabled) {
+    BaseType_t retS3xy = xTaskCreatePinnedToCore(s3xyMapperTask, "s3xyMap", 8192, nullptr, 1, &s3xyTaskHandle, 0);
+    if (retS3xy != pdPASS) {
+      P4CAN_SERIAL_PRINTF("S3XY mapper task creation failed: %d\n", retS3xy);
+      // Mapping is diagnostic only; do not reboot or disturb proven CAN logic.
+    }
+  } else {
+    s3xyTaskHandle = nullptr;
+    P4CAN_SERIAL_PRINTLN("S3XY: OFF · BLE task not started");
+  }
+
+  P4CAN_SERIAL_PRINTLN("BOOT OK");
+#if P4UCFG_USBLOG_ENABLED
+  canUsbStartTask();
+  __atomic_fetch_add(&canUsbControllerEpoch, 1U, __ATOMIC_RELAXED);
+#else
+  P4CAN_SERIAL_PRINTLN("USER_CONFIG: USB CAN logger disabled, USB CDC stays text");
+#endif
+}
+
+void loop() {
+#if P4CAN_SERIAL_DIAGNOSTICS
+  static unsigned long lastBeatLog = 0;
+  static uint32_t loopBeat = 0;
+  loopBeat++;
+  const unsigned long now = millis();
+
+  if (now - lastBeatLog >= 5000) {
+    lastBeatLog = now;
+    const unsigned long canAgeMs = (lastCanFrameMs == 0) ? 999999 : (now - lastCanFrameMs);
+    Serial.printf(
+      "[BEAT] uptime=%lu loop=%lu canBeat=%lu canRxTotal=%lu webBeat=%lu canFrames=%lu canAgeMs=%lu nativeATxOk=%lu nativeATxFail=%lu sumTxOk=%lu sumTxFail=%lu heap=%u\n",
+      now / 1000,
+      (unsigned long)loopBeat,
+      (unsigned long)canBeat,
+      (unsigned long)canRxTotal(),
+      (unsigned long)webBeat,
+      (unsigned long)canRxTotal(),
+      canAgeMs,
+      (unsigned long)nativeATxOk,
+      (unsigned long)nativeATxFail,
+      (unsigned long)sumTxOk,
+      (unsigned long)sumTxFail,
+      ESP.getFreeHeap()
+    );
+  }
+#endif
+#if P4CAN_USER_CONFIG
+  // 用户配置区：每秒自愈一次（召唤覆盖会被 CAN 全恢复清零，需要重新灌入）
+  p4UserCfgMaintain();
+#endif
+  vTaskDelay(pdMS_TO_TICKS(1000));
+}

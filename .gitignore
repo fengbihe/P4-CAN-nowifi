@@ -1,0 +1,12 @@
+# 编译产物
+build/
+firmware/*/build/
+__pycache__/
+*.pyc
+
+# 由 scripts/gen_intellisense.py 按本机路径生成，不入库
+.vscode/c_cpp_properties.json
+.vscode/c_cpp_properties.json.bak
+
+# macOS
+.DS_Store
